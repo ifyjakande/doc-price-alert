@@ -230,6 +230,12 @@ def calculate_monthly_averages(month_data: list) -> dict:
     return averages
 
 
+def get_wat_timestamp() -> str:
+    """Get current timestamp in WAT AM/PM format."""
+    now = datetime.now(NIGERIA_TZ)
+    return now.strftime("%d-%b-%Y %I:%M %p WAT")
+
+
 def format_daily_card(date_str: str, row: list, daily_avg: float) -> dict:
     """Format daily price alert as Google Chat card."""
     # Build supplier price widgets
@@ -246,13 +252,16 @@ def format_daily_card(date_str: str, row: list, daily_avg: float) -> dict:
             }
         })
 
+    # Get current WAT timestamp
+    wat_timestamp = get_wat_timestamp()
+
     card = {
         "cardsV2": [{
             "cardId": "daily-price-alert",
             "card": {
                 "header": {
                     "title": "DOC Price Alert",
-                    "subtitle": date_str
+                    "subtitle": f"{date_str} | {wat_timestamp}"
                 },
                 "sections": [
                     {
@@ -300,13 +309,16 @@ def format_monthly_card(month_name: str, year: int, averages: dict, days_count: 
     valid_avgs = [v for v in averages.values() if v is not None]
     overall_avg = sum(valid_avgs) / len(valid_avgs) if valid_avgs else 0
 
+    # Get current WAT timestamp
+    wat_timestamp = get_wat_timestamp()
+
     card = {
         "cardsV2": [{
             "cardId": "monthly-summary",
             "card": {
                 "header": {
                     "title": "Monthly DOC Price Summary",
-                    "subtitle": f"{month_name} {year}"
+                    "subtitle": f"{month_name} {year} | {wat_timestamp}"
                 },
                 "sections": [
                     {
