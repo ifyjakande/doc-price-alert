@@ -1,0 +1,36 @@
+name: DOC Price Alert
+
+on:
+  schedule:
+    - cron: '0 * * * *'  # Every hour
+  workflow_dispatch:  # Manual trigger
+
+jobs:
+  check-prices:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run price alert check
+        run: python doc_price_alert.py
+        env:
+          GOOGLE_SERVICE_ACCOUNT_KEY: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_KEY }}
+          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+          SHEET_NAME: ${{ secrets.SHEET_NAME }}
+          SPACE_WEBHOOK_URL: ${{ secrets.SPACE_WEBHOOK_URL }}
+
+      - name: Commit state changes
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "Update alert state"
+          file_pattern: ".github/state/*.json"
