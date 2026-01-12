@@ -3,6 +3,7 @@ import json
 import time
 import random
 import logging
+import hashlib
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -96,10 +97,18 @@ def get_sheet_data_with_retry(client: gspread.Client, max_retries: int = 5) -> l
     raise Exception("Max retries exceeded when fetching sheet data")
 
 
+def compute_row_hash(row: list) -> str:
+    """Compute a hash of the row data to detect changes."""
+    # Use first 24 columns (Date + 23 suppliers)
+    row_data = '|'.join(str(cell).strip() for cell in row[:24])
+    return hashlib.md5(row_data.encode()).hexdigest()
+
+
 def load_state() -> dict:
     """Load state from file or return default state."""
     default_state = {
         "last_processed_row": 0,
+        "last_row_hash": None,
         "last_monthly_alert": None
     }
 
@@ -236,7 +245,7 @@ def get_wat_timestamp() -> str:
     return now.strftime("%I:%M %p WAT")
 
 
-def format_daily_card(date_str: str, row: list, daily_avg: float) -> dict:
+def format_daily_card(date_str: str, row: list, daily_avg: float, is_update: bool = False) -> dict:
     """Format daily price alert as Google Chat card."""
     # Build supplier price widgets
     supplier_widgets = []
@@ -255,12 +264,15 @@ def format_daily_card(date_str: str, row: list, daily_avg: float) -> dict:
     # Get current WAT timestamp
     wat_timestamp = get_wat_timestamp()
 
+    # Different title for new entry vs update
+    title = "DOC Price Update" if is_update else "DOC Price Alert"
+
     card = {
         "cardsV2": [{
             "cardId": "daily-price-alert",
             "card": {
                 "header": {
-                    "title": "DOC Price Alert",
+                    "title": title,
                     "subtitle": f"{date_str} | {wat_timestamp}"
                 },
                 "sections": [
@@ -418,6 +430,7 @@ def main():
     # Load state
     state = load_state()
     last_processed_row = state.get("last_processed_row", 0)
+    last_row_hash = state.get("last_row_hash")
     last_monthly_alert = state.get("last_monthly_alert")
 
     # Get current time in Nigeria timezone
@@ -434,26 +447,35 @@ def main():
 
     state_updated = False
 
-    # Check for new daily data
+    # Check for new daily data or updates to existing data
     latest_row_index, latest_row = get_latest_complete_row(data)
 
-    if latest_row_index is not None and latest_row_index > last_processed_row:
-        logger.info(f"New complete row found at index {latest_row_index}")
+    if latest_row_index is not None:
+        current_row_hash = compute_row_hash(latest_row)
 
-        date_str = latest_row[0] if latest_row else "Unknown"
-        daily_avg = calculate_daily_average(latest_row)
+        # Check if this is a new row or an update to existing row
+        is_new_row = latest_row_index > last_processed_row
+        is_data_changed = (latest_row_index == last_processed_row and current_row_hash != last_row_hash)
 
-        if daily_avg is not None:
-            card = format_daily_card(date_str, latest_row, daily_avg)
+        if is_new_row or is_data_changed:
+            alert_type = "New" if is_new_row else "Update"
+            logger.info(f"{alert_type} data detected at row {latest_row_index}")
 
-            if send_webhook_with_retry(card):
-                state["last_processed_row"] = latest_row_index
-                state_updated = True
-                logger.info(f"Daily alert sent for {date_str}")
-            else:
-                logger.error("Failed to send daily alert")
-    else:
-        logger.info("No new complete rows found")
+            date_str = latest_row[0] if latest_row else "Unknown"
+            daily_avg = calculate_daily_average(latest_row)
+
+            if daily_avg is not None:
+                card = format_daily_card(date_str, latest_row, daily_avg, is_update=is_data_changed)
+
+                if send_webhook_with_retry(card):
+                    state["last_processed_row"] = latest_row_index
+                    state["last_row_hash"] = current_row_hash
+                    state_updated = True
+                    logger.info(f"Daily alert sent for {date_str} ({alert_type})")
+                else:
+                    logger.error("Failed to send daily alert")
+        else:
+            logger.info("No new data or updates found")
 
     # Check for monthly alert (first day of new month)
     if now.day == 1 and last_monthly_alert != current_month_key:
