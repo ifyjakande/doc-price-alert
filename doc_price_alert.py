@@ -158,6 +158,18 @@ def parse_price(value: str) -> Optional[float]:
         return None
 
 
+def format_price(value: str) -> str:
+    """Format price with commas where necessary (e.g., 1650 -> 1,650)."""
+    try:
+        # Parse the price
+        cleaned = value.replace(',', '').replace(' ', '').strip()
+        num = float(cleaned)
+        # Format with commas, no decimal places
+        return f"{num:,.0f}"
+    except (ValueError, AttributeError):
+        return value  # Return original if parsing fails
+
+
 def get_latest_complete_row(data: list) -> tuple:
     """Find the latest row with all columns filled. Returns (row_index, row_data)."""
     if len(data) <= 1:  # Only header or empty
@@ -279,12 +291,13 @@ def format_daily_card(date_str: str, row: list, daily_avg: float, is_update: boo
 
     for i, supplier in enumerate(SUPPLIERS):
         col_index = i + 1
-        price = row[col_index] if col_index < len(row) else "N/A"
+        price_raw = row[col_index] if col_index < len(row) else "N/A"
+        price = format_price(price_raw) if price_raw != "N/A" else "N/A"
 
         supplier_widgets.append({
             "decoratedText": {
                 "topLabel": supplier,
-                "text": f"{price}"
+                "text": price
             }
         })
 
