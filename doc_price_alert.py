@@ -231,9 +231,9 @@ def calculate_monthly_averages(month_data: list) -> dict:
 
 
 def get_wat_timestamp() -> str:
-    """Get current timestamp in WAT AM/PM format."""
+    """Get current timestamp in WAT AM/PM format (time only)."""
     now = datetime.now(NIGERIA_TZ)
-    return now.strftime("%d-%b-%Y %I:%M %p WAT")
+    return now.strftime("%I:%M %p WAT")
 
 
 def format_daily_card(date_str: str, row: list, daily_avg: float) -> dict:
