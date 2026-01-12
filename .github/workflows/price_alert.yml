@@ -11,6 +11,7 @@ permissions:
 jobs:
   check-prices:
     runs-on: ubuntu-latest
+    timeout-minutes: 45  # Allow time for retries on incomplete entries
 
     steps:
       - name: Checkout repository

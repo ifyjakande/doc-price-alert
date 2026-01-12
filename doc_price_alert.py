@@ -171,6 +171,33 @@ def get_latest_complete_row(data: list) -> tuple:
     return None, None
 
 
+def get_latest_row_with_date(data: list) -> tuple:
+    """Find the latest row that has a date (may be incomplete). Returns (row_index, row_data)."""
+    if len(data) <= 1:  # Only header or empty
+        return None, None
+
+    # Start from the end and find the last row with a date
+    for i in range(len(data) - 1, 0, -1):  # Skip header row (index 0)
+        row = data[i]
+        if row and len(row) > 0 and row[0].strip():
+            return i, row
+
+    return None, None
+
+
+def is_row_incomplete_but_started(row: list) -> bool:
+    """Check if a row has a date but not all prices filled."""
+    if not row or len(row) == 0:
+        return False
+
+    # Has date?
+    if not row[0].strip():
+        return False
+
+    # Check if incomplete (missing some values in first 24 columns)
+    return not is_row_complete(row)
+
+
 def calculate_daily_average(row: list) -> Optional[float]:
     """Calculate average price for a single day."""
     prices = []
@@ -423,59 +450,112 @@ def send_webhook_with_retry(payload: dict, max_retries: int = 5) -> bool:
     return False
 
 
+def check_and_process_daily_data(client: gspread.Client, state: dict, max_retries: int = 3, retry_delay: int = 600) -> bool:
+    """
+    Check for new daily data with retry logic for incomplete entries.
+
+    Args:
+        client: Authenticated gspread client
+        state: Current state dict
+        max_retries: Max retries for incomplete rows (default 3)
+        retry_delay: Seconds to wait between retries (default 600 = 10 minutes)
+
+    Returns:
+        True if state was updated, False otherwise
+    """
+    last_processed_row = state.get("last_processed_row", 0)
+    last_row_hash = state.get("last_row_hash")
+
+    for attempt in range(max_retries + 1):
+        # Fetch fresh data
+        try:
+            data = get_sheet_data_with_retry(client)
+        except Exception as e:
+            logger.error(f"Failed to fetch sheet data: {e}")
+            return False
+
+        # Check for complete rows
+        latest_complete_index, latest_complete_row = get_latest_complete_row(data)
+
+        # Check for incomplete rows (entry in progress)
+        latest_any_index, latest_any_row = get_latest_row_with_date(data)
+
+        # If there's a newer incomplete row, wait and retry
+        if latest_any_index is not None:
+            is_incomplete_new_row = (
+                latest_any_index > last_processed_row and
+                is_row_incomplete_but_started(latest_any_row)
+            )
+
+            if is_incomplete_new_row:
+                if attempt < max_retries:
+                    date_str = latest_any_row[0] if latest_any_row else "Unknown"
+                    logger.info(f"Incomplete entry detected for {date_str} at row {latest_any_index}. "
+                               f"Waiting {retry_delay // 60} minutes before retry {attempt + 1}/{max_retries}")
+                    time.sleep(retry_delay)
+                    continue
+                else:
+                    logger.info("Max retries reached for incomplete entry. Will check again next run.")
+                    return False
+
+        # Process complete row if found
+        if latest_complete_index is not None:
+            current_row_hash = compute_row_hash(latest_complete_row)
+
+            # Check if this is a new row or an update to existing row
+            is_new_row = latest_complete_index > last_processed_row
+            is_data_changed = (latest_complete_index == last_processed_row and current_row_hash != last_row_hash)
+
+            if is_new_row or is_data_changed:
+                alert_type = "New" if is_new_row else "Update"
+                logger.info(f"{alert_type} data detected at row {latest_complete_index}")
+
+                date_str = latest_complete_row[0] if latest_complete_row else "Unknown"
+                daily_avg = calculate_daily_average(latest_complete_row)
+
+                if daily_avg is not None:
+                    card = format_daily_card(date_str, latest_complete_row, daily_avg, is_update=is_data_changed)
+
+                    if send_webhook_with_retry(card):
+                        state["last_processed_row"] = latest_complete_index
+                        state["last_row_hash"] = current_row_hash
+                        logger.info(f"Daily alert sent for {date_str} ({alert_type})")
+                        return True
+                    else:
+                        logger.error("Failed to send daily alert")
+                        return False
+            else:
+                logger.info("No new data or updates found")
+
+        break
+
+    return False
+
+
 def main():
     """Main function to check for price updates and send alerts."""
     logger.info("Starting DOC Price Alert check")
 
     # Load state
     state = load_state()
-    last_processed_row = state.get("last_processed_row", 0)
-    last_row_hash = state.get("last_row_hash")
     last_monthly_alert = state.get("last_monthly_alert")
 
     # Get current time in Nigeria timezone
     now = datetime.now(NIGERIA_TZ)
     current_month_key = now.strftime("%Y-%m")
 
-    # Authenticate and fetch data
+    # Authenticate
     try:
         client = authenticate_google_sheets()
-        data = get_sheet_data_with_retry(client)
     except Exception as e:
-        logger.error(f"Failed to fetch sheet data: {e}")
+        logger.error(f"Failed to authenticate: {e}")
         return
 
     state_updated = False
 
-    # Check for new daily data or updates to existing data
-    latest_row_index, latest_row = get_latest_complete_row(data)
-
-    if latest_row_index is not None:
-        current_row_hash = compute_row_hash(latest_row)
-
-        # Check if this is a new row or an update to existing row
-        is_new_row = latest_row_index > last_processed_row
-        is_data_changed = (latest_row_index == last_processed_row and current_row_hash != last_row_hash)
-
-        if is_new_row or is_data_changed:
-            alert_type = "New" if is_new_row else "Update"
-            logger.info(f"{alert_type} data detected at row {latest_row_index}")
-
-            date_str = latest_row[0] if latest_row else "Unknown"
-            daily_avg = calculate_daily_average(latest_row)
-
-            if daily_avg is not None:
-                card = format_daily_card(date_str, latest_row, daily_avg, is_update=is_data_changed)
-
-                if send_webhook_with_retry(card):
-                    state["last_processed_row"] = latest_row_index
-                    state["last_row_hash"] = current_row_hash
-                    state_updated = True
-                    logger.info(f"Daily alert sent for {date_str} ({alert_type})")
-                else:
-                    logger.error("Failed to send daily alert")
-        else:
-            logger.info("No new data or updates found")
+    # Check for new daily data with retry logic for incomplete entries
+    if check_and_process_daily_data(client, state):
+        state_updated = True
 
     # Check for monthly alert (first day of new month)
     if now.day == 1 and last_monthly_alert != current_month_key:
@@ -488,20 +568,25 @@ def main():
 
         logger.info(f"Calculating monthly summary for {prev_month_name} {prev_year}")
 
-        month_data = get_month_data(data, prev_year, prev_month)
+        # Fetch data for monthly calculation
+        try:
+            data = get_sheet_data_with_retry(client)
+            month_data = get_month_data(data, prev_year, prev_month)
 
-        if month_data:
-            averages = calculate_monthly_averages(month_data)
-            card = format_monthly_card(prev_month_name, prev_year, averages, len(month_data))
+            if month_data:
+                averages = calculate_monthly_averages(month_data)
+                card = format_monthly_card(prev_month_name, prev_year, averages, len(month_data))
 
-            if send_webhook_with_retry(card):
-                state["last_monthly_alert"] = current_month_key
-                state_updated = True
-                logger.info(f"Monthly alert sent for {prev_month_name} {prev_year}")
+                if send_webhook_with_retry(card):
+                    state["last_monthly_alert"] = current_month_key
+                    state_updated = True
+                    logger.info(f"Monthly alert sent for {prev_month_name} {prev_year}")
+                else:
+                    logger.error("Failed to send monthly alert")
             else:
-                logger.error("Failed to send monthly alert")
-        else:
-            logger.warning(f"No data found for {prev_month_name} {prev_year}")
+                logger.warning(f"No data found for {prev_month_name} {prev_year}")
+        except Exception as e:
+            logger.error(f"Failed to fetch data for monthly summary: {e}")
 
     # Save state if updated
     if state_updated:
