@@ -33,6 +33,22 @@ STATE_FILE = ".github/state/alert_state.json"
 # Timezone for Nigeria
 NIGERIA_TZ = pytz.timezone('Africa/Lagos')
 
+# Predicted monthly prices (expected DOC cost per month)
+PREDICTED_MONTHLY_PRICES = {
+    1: 1569,   # JAN
+    2: 1713,   # FEB
+    3: 850,    # MAR
+    4: 1177,   # APR
+    5: 727,    # MAY
+    6: 802,    # JUN
+    7: 938,    # JUL
+    8: 1414,   # AUG
+    9: 1897,   # SEP
+    10: 2212,  # OCT
+    11: 1926,  # NOV
+    12: 843,   # DEC
+}
+
 
 def get_env_variable(name: str) -> str:
     """Get environment variable or raise error if not set."""
@@ -341,7 +357,7 @@ def format_daily_card(date_str: str, row: list, daily_avg: float, is_update: boo
     return card
 
 
-def format_monthly_card(month_name: str, year: int, averages: dict, days_count: int) -> dict:
+def format_monthly_card(month_name: str, year: int, month_num: int, averages: dict, days_count: int) -> dict:
     """Format monthly summary alert as Google Chat card."""
     # Build supplier average widgets
     supplier_widgets = []
@@ -360,6 +376,14 @@ def format_monthly_card(month_name: str, year: int, averages: dict, days_count: 
     # Calculate overall monthly average
     valid_avgs = [v for v in averages.values() if v is not None]
     overall_avg = sum(valid_avgs) / len(valid_avgs) if valid_avgs else 0
+
+    # Get predicted price for this month
+    predicted_price = PREDICTED_MONTHLY_PRICES.get(month_num, 0)
+
+    # Calculate difference (actual - predicted)
+    difference = overall_avg - predicted_price
+    diff_sign = "+" if difference >= 0 else ""
+    diff_text = f"{diff_sign}{difference:,.0f}"
 
     # Get current WAT timestamp
     wat_timestamp = get_wat_timestamp()
@@ -384,8 +408,20 @@ def format_monthly_card(month_name: str, year: int, averages: dict, days_count: 
                         "widgets": [
                             {
                                 "decoratedText": {
-                                    "topLabel": "Monthly Average",
+                                    "topLabel": "Actual Monthly Average",
                                     "text": f"{overall_avg:,.0f}"
+                                }
+                            },
+                            {
+                                "decoratedText": {
+                                    "topLabel": "Predicted Monthly Average",
+                                    "text": f"{predicted_price:,.0f}"
+                                }
+                            },
+                            {
+                                "decoratedText": {
+                                    "topLabel": "Difference (Actual - Predicted)",
+                                    "text": diff_text
                                 }
                             },
                             {
@@ -588,7 +624,7 @@ def main():
 
             if month_data:
                 averages = calculate_monthly_averages(month_data)
-                card = format_monthly_card(prev_month_name, prev_year, averages, len(month_data))
+                card = format_monthly_card(prev_month_name, prev_year, prev_month, averages, len(month_data))
 
                 if send_webhook_with_retry(card):
                     state["last_monthly_alert"] = current_month_key
