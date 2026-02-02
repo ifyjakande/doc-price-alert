@@ -385,6 +385,11 @@ def format_monthly_card(month_name: str, year: int, month_num: int, averages: di
     diff_sign = "+" if difference >= 0 else ""
     diff_text = f"{diff_sign}{difference:,.0f}"
 
+    # Visual styling for difference (green if favorable, red if not)
+    is_favorable = difference < 0  # Lower than predicted = good
+    diff_color = "#2ca02c" if is_favorable else "#e74c3c"
+    diff_icon = "STAR" if is_favorable else "BOOKMARK"
+
     # Get current WAT timestamp
     wat_timestamp = get_wat_timestamp()
 
@@ -420,8 +425,11 @@ def format_monthly_card(month_name: str, year: int, month_num: int, averages: di
                             },
                             {
                                 "decoratedText": {
+                                    "startIcon": {
+                                        "knownIcon": diff_icon
+                                    },
                                     "topLabel": "Difference (Actual - Predicted)",
-                                    "text": diff_text
+                                    "text": f"<font color=\"{diff_color}\">{diff_text}</font>"
                                 }
                             },
                             {
