@@ -659,7 +659,7 @@ def send_webhook_with_retry(payload: dict, max_retries: int = 5) -> bool:
                 continue
 
             # Client error (4xx except 429) - don't retry
-            logger.error(f"Webhook failed with HTTP {response.status_code}: {response.text}")
+            logger.error(f"Webhook failed with HTTP {response.status_code}")
             return False
 
         except requests.exceptions.Timeout:
@@ -669,7 +669,7 @@ def send_webhook_with_retry(payload: dict, max_retries: int = 5) -> bool:
             continue
         except requests.exceptions.RequestException as e:
             delay = (2 ** attempt) + random.uniform(0, 1)
-            logger.warning(f"Request error: {e}. Retrying in {delay:.2f}s")
+            logger.warning(f"Request error: {type(e).__name__}. Retrying in {delay:.2f}s")
             time.sleep(delay)
             continue
 
