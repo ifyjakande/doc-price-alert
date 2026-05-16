@@ -4,7 +4,7 @@ import time
 import random
 import logging
 import hashlib
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from typing import Optional
 
 import gspread
@@ -226,20 +226,199 @@ def is_row_incomplete_but_started(row: list) -> bool:
     return not is_row_complete(row)
 
 
-def calculate_daily_average(row: list) -> Optional[float]:
-    """Calculate average price for a single day."""
+def _row_prices(row: list) -> list:
+    """Parse the 23 supplier price columns from a row, skipping blank/bad cells."""
     prices = []
-
     # Skip first column (Date), get prices for all suppliers
     for i in range(1, min(len(row), 24)):
         price = parse_price(row[i])
         if price is not None:
             prices.append(price)
+    return prices
 
+
+def calculate_daily_average(row: list) -> Optional[float]:
+    """Calculate average price for a single day."""
+    prices = _row_prices(row)
     if not prices:
         return None
 
     return sum(prices) / len(prices)
+
+
+def parse_row_date(date_str: str) -> Optional[datetime]:
+    """Parse a sheet date cell using the same formats as get_month_data."""
+    try:
+        date_str = date_str.strip()
+    except AttributeError:
+        return None
+
+    for fmt in ['%d-%b-%Y', '%Y-%m-%d', '%d/%m/%Y', '%m/%d/%Y']:
+        try:
+            return datetime.strptime(date_str, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def count_reporting_suppliers(row: list) -> int:
+    """Count how many of the 23 supplier columns have a parseable price."""
+    return len(_row_prices(row))
+
+
+def build_daily_avg_map(data: list) -> dict:
+    """Map date -> (average_price, supplier_count) for every dated row.
+
+    Averages over whichever suppliers reported that day (does not require a
+    complete row), matching calculate_daily_average. On duplicate dates the
+    later row in the sheet wins.
+    """
+    avg_map = {}
+
+    for row in data[1:]:  # Skip header
+        if not row or not row[0]:
+            continue
+
+        row_date = parse_row_date(row[0])
+        if row_date is None:
+            continue
+
+        prices = _row_prices(row)
+        if prices:
+            avg_map[row_date.date()] = (sum(prices) / len(prices), len(prices))
+
+    return avg_map
+
+
+def find_reference_price(avg_map: dict, target_date: date,
+                         max_lookback_days: int = 14) -> Optional[tuple]:
+    """Nearest recorded day on or before target_date (snap back).
+
+    Returns (recorded_date, avg, supplier_count, days_off) or None.
+    Search is strictly backward, so it never returns a date after the target.
+    """
+    for days_off in range(max_lookback_days + 1):
+        day = target_date - timedelta(days=days_off)
+        if day in avg_map:
+            avg, count = avg_map[day]
+            return (day, avg, count, days_off)
+    return None
+
+
+def format_six_week_card(entry_date: datetime, current_avg: float,
+                         current_count: int, reference: Optional[tuple],
+                         target_date: date) -> dict:
+    """Format the 6-week comparison alert as a Google Chat card."""
+    wat_timestamp = get_wat_timestamp()
+
+    latest_widgets = [
+        {
+            "decoratedText": {
+                "topLabel": f"Latest Price ({entry_date:%d %B %Y})",
+                "text": f"{current_avg:,.0f}"
+            }
+        },
+        {
+            "decoratedText": {
+                "topLabel": "Suppliers Reporting",
+                "text": str(current_count)
+            }
+        }
+    ]
+
+    sections = [
+        {
+            "header": "Latest Price",
+            "widgets": latest_widgets
+        }
+    ]
+
+    if reference is None:
+        sections.append({
+            "header": "6 Weeks Ago",
+            "widgets": [
+                {
+                    "decoratedText": {
+                        "text": (
+                            f"No price recorded near 6 weeks ago "
+                            f"(target {target_date:%d %B %Y}); "
+                            f"comparison unavailable."
+                        )
+                    }
+                }
+            ]
+        })
+    else:
+        ref_date, ref_avg, ref_count, days_off = reference
+
+        sections.append({
+            "header": "6 Weeks Ago",
+            "widgets": [
+                {
+                    "decoratedText": {
+                        "topLabel": f"Price (recorded {ref_date:%d %B %Y})",
+                        "text": f"{ref_avg:,.0f}"
+                    }
+                },
+                {
+                    "decoratedText": {
+                        "topLabel": "Days Off Exact 6-Week Mark",
+                        "text": f"{days_off} day(s) before {target_date:%d %B %Y}"
+                    }
+                },
+                {
+                    "decoratedText": {
+                        "topLabel": "Suppliers Reporting",
+                        "text": str(ref_count)
+                    }
+                }
+            ]
+        })
+
+        difference = current_avg - ref_avg
+        diff_sign = "+" if difference >= 0 else ""
+        diff_text = f"{diff_sign}{difference:,.0f}"
+        pct = (difference / ref_avg * 100) if ref_avg else 0
+        pct_text = f"{diff_sign}{pct:,.1f}%"
+
+        # Lower than 6 weeks ago = favorable (green); higher = red
+        is_favorable = difference < 0
+        diff_color = "#2ca02c" if is_favorable else "#e74c3c"
+        diff_icon = "STAR" if is_favorable else "BOOKMARK"
+
+        sections.append({
+            "header": "Change vs 6 Weeks Ago",
+            "widgets": [
+                {
+                    "decoratedText": {
+                        "startIcon": {
+                            "knownIcon": diff_icon
+                        },
+                        "topLabel": "Change (Latest - 6 Weeks Ago)",
+                        "text": f"<font color=\"{diff_color}\">{diff_text}</font>"
+                    }
+                },
+                {
+                    "decoratedText": {
+                        "topLabel": "Change (%)",
+                        "text": f"<font color=\"{diff_color}\">{pct_text}</font>"
+                    }
+                }
+            ]
+        })
+
+    return {
+        "cardsV2": [{
+            "cardId": "six-week-comparison",
+            "card": {
+                "header": {
+                    "title": "DOC Buying Price - 6-Week Comparison",
+                    "subtitle": f"{entry_date:%d %B %Y} | {wat_timestamp}"
+                },
+                "sections": sections
+            }
+        }]
+    }
 
 
 def get_month_data(data: list, year: int, month: int) -> list:
@@ -251,16 +430,7 @@ def get_month_data(data: list, year: int, month: int) -> list:
             continue
 
         try:
-            # Try parsing date in various formats
-            date_str = row[0].strip()
-            row_date = None
-
-            for fmt in ['%d-%b-%Y', '%Y-%m-%d', '%d/%m/%Y', '%m/%d/%Y']:
-                try:
-                    row_date = datetime.strptime(date_str, fmt)
-                    break
-                except ValueError:
-                    continue
+            row_date = parse_row_date(row[0])
 
             if row_date and row_date.year == year and row_date.month == month:
                 if is_row_complete(row):
@@ -577,6 +747,29 @@ def check_and_process_daily_data(client: gspread.Client, state: dict, max_retrie
                         state["last_processed_row"] = latest_complete_index
                         state["last_row_hash"] = current_row_hash
                         logger.info(f"Daily alert sent for {date_str} ({alert_type})")
+
+                        # 6-week comparison card: new rows only, never blocks
+                        # the daily/monthly alerts.
+                        if is_new_row:
+                            try:
+                                entry_dt = parse_row_date(date_str)
+                                if entry_dt is None:
+                                    raise ValueError(f"Unparseable entry date: {date_str!r}")
+                                target = (entry_dt - timedelta(days=42)).date()
+                                avg_map = build_daily_avg_map(data)
+                                reference = find_reference_price(avg_map, target)
+                                current_count = count_reporting_suppliers(latest_complete_row)
+                                six_week_card = format_six_week_card(
+                                    entry_dt, daily_avg, current_count, reference, target
+                                )
+                                if send_webhook_with_retry(six_week_card):
+                                    logger.info(f"6-week comparison card sent for {date_str}")
+                                else:
+                                    logger.error("6-week comparison card failed to send "
+                                                 "(daily alert unaffected)")
+                            except Exception:
+                                logger.exception("6-week comparison card skipped")
+
                         return True
                     else:
                         logger.error("Failed to send daily alert")
