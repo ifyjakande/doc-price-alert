@@ -8,6 +8,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: doc-price-alert
+  cancel-in-progress: false  # queue runs; never push bot-state concurrently
+
 jobs:
   check-prices:
     runs-on: ubuntu-latest
@@ -27,6 +31,18 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Restore alert state from bot-state branch
+        run: |
+          mkdir -p .github/state
+          if git fetch origin bot-state --depth=1 2>/dev/null \
+             && git cat-file -e origin/bot-state:.github/state/alert_state.json 2>/dev/null; then
+            git show origin/bot-state:.github/state/alert_state.json > .github/state/alert_state.json
+            echo "Restored alert state:"
+            cat .github/state/alert_state.json
+          else
+            echo "No state on bot-state yet; script will start from default."
+          fi
+
       - name: Run price alert check
         run: python doc_price_alert.py
         env:
@@ -35,8 +51,20 @@ jobs:
           SHEET_NAME: ${{ secrets.SHEET_NAME }}
           SPACE_WEBHOOK_URL: ${{ secrets.SPACE_WEBHOOK_URL }}
 
-      - name: Commit state changes
-        uses: stefanzweifel/git-auto-commit-action@v5
-        with:
-          commit_message: "Update alert state"
-          file_pattern: ".github/state/*.json"
+      - name: Save alert state to bot-state branch
+        run: |
+          test -f .github/state/alert_state.json || { echo "no state file to save"; exit 0; }
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin bot-state --depth=1
+          git worktree add /tmp/bot-state origin/bot-state
+          mkdir -p /tmp/bot-state/.github/state
+          cp .github/state/alert_state.json /tmp/bot-state/.github/state/alert_state.json
+          git -C /tmp/bot-state add .github/state/alert_state.json
+          if git -C /tmp/bot-state diff --cached --quiet; then
+            echo "state unchanged; nothing to commit"
+          else
+            git -C /tmp/bot-state commit -m "update alert state"
+            git -C /tmp/bot-state push origin HEAD:bot-state
+          fi
+          git worktree remove --force /tmp/bot-state

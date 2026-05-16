@@ -1,6 +1,6 @@
 # Local credentials - IMPORTANT: excludes service account files
 *.json
-!.github/state/alert_state.json
+# alert state lives on the bot-state branch, not main
 
 # Python
 __pycache__/
